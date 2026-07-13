@@ -109,9 +109,14 @@ run (destructive changes, outward-facing deliverables, judgment calls) — \
 also use it for anything the operator will want to preview.
 
 Each mission must be a self-contained brief: goal, concrete steps, \
-constraints, and a CHECKABLE definition of done. End every mission with: \
-'When done, record what you learned: python hermes/hermes.py note \
-"<problem>" "<solution>" --tags mission'.
+constraints, and a CHECKABLE definition of done.
+
+The brain holds SIGNAL, not a log of every run. Only tell a role to record a \
+Hermes note when the work is genuinely worth remembering: a hard concept, a \
+rare edge case, something token-expensive, or a point that was confusing to \
+get right. For mechanical or obvious steps, do NOT add a note. When one is \
+warranted, end that role's brief with: 'If you hit something non-obvious, \
+record it: python hermes/hermes.py note "<problem>" "<solution>" --tags mission'.
 
 If prior solutions are provided under "Brain recall", fold them into the \
 relevant briefs so workers reuse instead of re-solving."""
@@ -120,6 +125,32 @@ relevant briefs so workers reuse instead of re-solving."""
 def emit(cid, detail, event="ceo"):
     subprocess.run([sys.executable, MIRROR, "--session", cid, "--event", event,
                     "--detail", detail[:200]], capture_output=True)
+
+
+# thresholds for "worth a brain note" — tuned so cheap mechanical successes are
+# skipped and hard/rare/expensive/failed work is kept. Bump these if the brain
+# still fills with noise; lower them if genuine learnings get dropped.
+WORTH_COST = 0.15    # dollars: token-heavy runs
+WORTH_TURNS = 40     # a single role that ran deep
+
+
+def _worth_remembering(o):
+    """The brain records signal, not every run. Keep a note only when a mission
+    was actually instructive: it failed (failures teach most), was token-heavy,
+    needed several coordinated roles, leaned on hard reasoning (opus/fable), or
+    ran a role deep. Skip cheap, mechanical, first-try successes."""
+    roles = o.get("roles") or []
+    if o.get("status") in ("failed", "error"):
+        return True
+    if (o.get("cost") or 0) >= WORTH_COST:
+        return True
+    if len([r for r in roles if r.get("status") != "skipped"]) >= 2:
+        return True
+    if any(r.get("model") in ("opus", "fable") for r in roles):
+        return True
+    if any((r.get("turns") or 0) >= WORTH_TURNS for r in roles):
+        return True
+    return False
 
 
 def _api(model, system, user, schema, max_tokens=4000, timeout=120):
@@ -374,13 +405,17 @@ def _run(cid):
         o["status"] = "failed" if failed else "done"
         _save(o)
         emit(cid, "mission %s: %s ($%s)" % (o["status"], o["name"], o["cost"]))
-        # 5. learn — the outcome lands in Hermes, which mirrors into Obsidian
-        outcome = "; ".join("%s=%s" % (r["id"], r["status"]) for r in o["roles"])
-        last = next((r["result"] for r in reversed(o["roles"]) if r.get("result")), "")
-        subprocess.run([sys.executable, HERMES, "note", o["goal"][:180],
-                        ("%s. %s" % (outcome, last))[:400],
-                        "--tags", "mission,ceo", "--source", "ceo:" + cid],
-                       capture_output=True)
+        # 5. learn — but only when it's worth remembering (signal, not a log).
+        # Trivial cheap successes are skipped so the brain stays high-signal.
+        if _worth_remembering(o):
+            outcome = "; ".join("%s=%s" % (r["id"], r["status"]) for r in o["roles"])
+            last = next((r["result"] for r in reversed(o["roles"]) if r.get("result")), "")
+            subprocess.run([sys.executable, HERMES, "note", o["goal"][:180],
+                            ("%s. %s" % (outcome, last))[:400],
+                            "--tags", "mission,ceo", "--source", "ceo:" + cid],
+                           capture_output=True)
+        else:
+            emit(cid, "skipped brain note (routine run — brain holds signal, not logs)")
     except Exception as e:  # never leave a run stuck at "running"
         o["status"] = "error"
         o["detail"] = repr(e)[:300]
@@ -416,4 +451,14 @@ if __name__ == "__main__":
     json.dumps(REFINE_SCHEMA), json.dumps(PLAN_SCHEMA)
     assert "opus" in ROLE_MODELS and "fable" in ROLE_MODELS
     assert "fold" in PLAN_SYSTEM.lower() and "hermes" in PLAN_SYSTEM.lower()
+    # the brain gate: keep signal, drop noise
+    trivial = {"status": "done", "cost": 0.05,
+               "roles": [{"model": "haiku", "turns": 8, "status": "done"}]}
+    hard = {"status": "done", "cost": 0.05,
+            "roles": [{"model": "opus", "turns": 30, "status": "done"}]}
+    failed = {"status": "failed", "cost": 0.01,
+              "roles": [{"model": "haiku", "turns": 5, "status": "failed"}]}
+    assert not _worth_remembering(trivial), "cheap mechanical success should be skipped"
+    assert _worth_remembering(hard), "opus reasoning should be kept"
+    assert _worth_remembering(failed), "failures should be kept"
     print("ceo.py OK — key present:", bool(chat._api_key()))

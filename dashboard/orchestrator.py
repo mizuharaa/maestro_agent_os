@@ -227,13 +227,19 @@ def _run(oid):
                 o["status"] = "done"
                 _save(o)
                 emit(oid, "mission accepted after %d round(s), $%s" % (rnd, o["cost"]))
-                # learn: the accepted mission + outcome land in the brain so it
-                # is never re-solved from scratch (the flywheel, automatically).
-                subprocess.run([sys.executable, os.path.join(ROOT, "hermes", "hermes.py"),
-                                "note", o["mission"][:180],
-                                ("accepted after %d round(s): %s" % (rnd, report))[:400],
-                                "--tags", "mission,orchestrated", "--source", "loop:" + oid],
-                               capture_output=True)
+                # learn — but only when worth remembering: the brain holds signal,
+                # not every accepted run. Keep it if the loop actually cost real
+                # tokens, iterated (>=2 rounds), or ran hard reasoning.
+                worth = ((o.get("cost") or 0) >= 0.15 or rnd >= 2
+                         or o.get("model") in ("opus", "fable"))
+                if worth:
+                    subprocess.run([sys.executable, os.path.join(ROOT, "hermes", "hermes.py"),
+                                    "note", o["mission"][:180],
+                                    ("accepted after %d round(s): %s" % (rnd, report))[:400],
+                                    "--tags", "mission,orchestrated", "--source", "loop:" + oid],
+                                   capture_output=True)
+                else:
+                    emit(oid, "skipped brain note (routine run — brain holds signal)")
                 return
             if verdict == "reject":
                 o["status"] = "rejected"

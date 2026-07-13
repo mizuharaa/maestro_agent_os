@@ -341,3 +341,7 @@
 {"session": "conductor", "event": "bootstrap", "detail": "verify wire", "ts": "2026-07-13T14:04:57"}
 {"session": "conductor", "event": "loop", "detail": "bootstrap-loop iter 1/2: doer exit=0, goal MET", "ts": "2026-07-13T14:04:58"}
 {"session": "conductor", "event": "loop", "detail": "bootstrap-loop PASS in 1 iteration(s)", "ts": "2026-07-13T14:04:58"}
+{"session": "conductor", "event": "learn", "detail": "brain: UI maximalism: cursor-tracking 3D card tilt + decorative rings on every card create visual noise; sparse cards stretch to equal height leaving empty voids", "ts": "2026-07-13T14:10:32"}
+{"session": "conductor", "event": "bootstrap", "detail": "verify wire", "ts": "2026-07-13T14:21:53"}
+{"session": "conductor", "event": "loop", "detail": "bootstrap-loop iter 1/2: doer exit=0, goal MET", "ts": "2026-07-13T14:21:53"}
+{"session": "conductor", "event": "loop", "detail": "bootstrap-loop PASS in 1 iteration(s)", "ts": "2026-07-13T14:21:54"}
