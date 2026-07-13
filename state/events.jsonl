@@ -345,3 +345,7 @@
 {"session": "conductor", "event": "bootstrap", "detail": "verify wire", "ts": "2026-07-13T14:21:53"}
 {"session": "conductor", "event": "loop", "detail": "bootstrap-loop iter 1/2: doer exit=0, goal MET", "ts": "2026-07-13T14:21:53"}
 {"session": "conductor", "event": "loop", "detail": "bootstrap-loop PASS in 1 iteration(s)", "ts": "2026-07-13T14:21:54"}
+{"session": "conductor", "event": "learn", "detail": "brain: Brain/knowledge base filling with routine noise instead of signal: every completed mission auto-logged, every role told to record, cheap first-try successes polluted the vau", "ts": "2026-07-13T14:22:35"}
+{"session": "conductor", "event": "bootstrap", "detail": "verify wire", "ts": "2026-07-13T14:29:32"}
+{"session": "conductor", "event": "loop", "detail": "bootstrap-loop iter 1/2: doer exit=0, goal MET", "ts": "2026-07-13T14:29:32"}
+{"session": "conductor", "event": "loop", "detail": "bootstrap-loop PASS in 1 iteration(s)", "ts": "2026-07-13T14:29:32"}

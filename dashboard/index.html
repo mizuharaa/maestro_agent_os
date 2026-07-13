@@ -400,6 +400,36 @@
   .cmdbar input::placeholder{color:var(--ink3)}
   .cmdbar{position:relative}
   .cmdbar input{min-width:0}
+  /* split Run-it button: primary action + a chevron that opens CEO overrides */
+  .cmdsplit{display:flex; flex:none}
+  .cmdgo{display:inline-flex; align-items:center; gap:7px; background:var(--green); color:#fff;
+    font-weight:750; font-size:13.5px; border-radius:13px 0 0 13px; padding:10px 16px 10px 19px; transition:.15s}
+  .cmdgo:hover{background:var(--green-mid)} .cmdgo:disabled{opacity:.5; cursor:default}
+  .cmddrop{width:36px; border-radius:0 13px 13px 0; background:var(--green); color:#fff; display:grid;
+    place-items:center; border-left:1px solid rgba(255,255,255,.28); transition:.15s; position:relative}
+  .cmddrop:hover{background:var(--green-mid)}
+  .cmddrop svg{width:13px; height:13px; stroke:#fff; fill:none; stroke-width:2.4; stroke-linecap:round;
+    stroke-linejoin:round; transition:transform .2s}
+  .cmdbar.optsopen .cmddrop svg{transform:rotate(180deg)}
+  .cmddrop .dot{position:absolute; top:5px; right:5px; width:7px; height:7px; border-radius:50%;
+    background:#fff; box-shadow:0 0 0 2px var(--green); opacity:0; transition:opacity .15s}
+  .cmddrop.tuned .dot{opacity:1}
+  .cmdpop{position:absolute; right:0; top:calc(100% + 10px); width:320px; max-width:calc(100vw - 40px);
+    background:var(--card); border:1px solid var(--line2); border-radius:16px; padding:14px 16px;
+    box-shadow:var(--lift); z-index:30; display:none}
+  .cmdpop.open{display:block; animation:popin .18s cubic-bezier(.2,.7,.2,1)}
+  @keyframes popin{from{opacity:0; transform:translateY(-6px)} to{opacity:1; transform:none}}
+  .cmdpop .phead{font-size:10.5px; font-weight:750; letter-spacing:.08em; text-transform:uppercase;
+    color:var(--ink3); padding:0 0 8px}
+  .cmdpop .prow{display:flex; align-items:center; justify-content:space-between; gap:12px; padding:6px 0}
+  .cmdpop .prow label{font-size:12.5px; font-weight:650; color:var(--ink2); flex:none}
+  .cmdpop .prow select{flex:1; min-width:0; max-width:190px; border:1px solid var(--line2); border-radius:9px;
+    padding:5.5px 9px; font:inherit; font-size:12.5px; background:var(--field); color:var(--ink)}
+  .cmdpop .chk{display:flex; align-items:center; gap:9px; font-size:12.5px; font-weight:650;
+    color:var(--ink2); padding:8px 0 2px; cursor:pointer}
+  .cmdpop .chk input{accent-color:var(--green); width:15px; height:15px}
+  .cmdpop .pnote{font-size:11px; color:var(--ink3); border-top:1px solid var(--line); margin-top:9px;
+    padding-top:9px; line-height:1.5}
   .cmdflow{display:flex; flex-direction:column; gap:8px; margin-top:10px}
   .cmdmsg{font-size:13.5px; line-height:1.55; border-radius:13px; padding:10px 15px; overflow-wrap:anywhere}
   .cmdmsg.u{background:var(--green); color:#fff; align-self:flex-end; max-width:78%; border-bottom-right-radius:5px}
@@ -724,7 +754,21 @@
         <div class="cmdbar" id="cmdbarbox">
           <svg class="spark" viewBox="0 0 24 24" id="cmdspark"></svg>
           <input id="cmdinput" autocomplete="off" spellcheck="false" placeholder="Tell the CEO what to do…">
-          <button class="cmdgo" id="cmdgo" style="border-radius:13px">Run it</button>
+          <div class="cmdsplit">
+            <button class="cmdgo" id="cmdgo">Run it</button>
+            <button class="cmddrop" id="cmddrop" title="model, effort & account overrides"><span class="dot"></span><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
+          </div>
+          <div class="cmdpop" id="cmdpop">
+            <div class="phead">CEO overrides · auto = the CEO decides per role</div>
+            <div class="prow"><label>Model</label>
+              <select id="cmd-model"><option value="auto" selected>Auto · per role</option><option value="haiku">Haiku · all roles</option><option value="sonnet">Sonnet · all roles</option><option value="opus">Opus · all roles</option><option value="fable">Fable · all roles</option></select></div>
+            <div class="prow"><label>Effort</label>
+              <select id="cmd-effort"><option value="auto" selected>Auto</option><option value="quick">Quick · 15 turns</option><option value="standard">Standard · 40</option><option value="deep">Deep · 80</option></select></div>
+            <div class="prow"><label>Account</label>
+              <select id="cmd-account"><option value="auto" selected>Auto · most headroom</option></select></div>
+            <label class="chk"><input type="checkbox" id="cmd-gate"> Review every role before it runs</label>
+            <div class="pnote">On Auto the CEO tiers each role itself — Opus for hard work, Fable for frontier thinking, Sonnet/Haiku for light steps. Override to force the whole roster.</div>
+          </div>
         </div>
         <div class="cmdflow" id="cmdflow"></div>
       </div>
@@ -1045,14 +1089,20 @@ function cmdType(){
 }
 function cmdMsg(role,html){const d=document.createElement("div");d.className="cmdmsg "+role;
   d.innerHTML=html;$("cmdflow").appendChild(d);return d}
+// Run-it dropdown overrides — "auto" everywhere means the CEO decides per role
+function cmdOpts(){return{model:$("cmd-model").value,effort:$("cmd-effort").value,
+  account:$("cmd-account").value,gate:$("cmd-gate").checked}}
+function cmdTuned(){const o=cmdOpts();
+  return o.model!=="auto"||o.effort!=="auto"||o.account!=="auto"||o.gate}
 async function cmdSend(){
   const inp=$("cmdinput"),text=inp.value.trim();
   if(!text||CMD.busy)return;
   CMD.busy=true;$("cmdgo").disabled=true;inp.value="";
+  $("cmdpop").classList.remove("open");$("cmdbarbox").classList.remove("optsopen");
   cmdMsg("u",esc(text));
   const th=cmdMsg("a",`<span class="dots"><i></i><i></i><i></i></span> refining the prompt, querying the brain, staffing the mission…`);
   try{
-    const j=await post("/api/ceo",{text});
+    const j=await post("/api/ceo",{text,opts:cmdOpts()});
     th.innerHTML=`<b>${esc(j.name||"Mission")}</b> staffed — ${j.roles.length} role${j.roles.length===1?"":"s"}${j.recall?" · brain recall folded in":""}.
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:7px">${j.roles.map(r=>
         `<span class="achip" title="${esc(r.mission.slice(0,180))}">${esc(r.title)} · ${esc(r.model)} · ${r.turns}t${r.review?" · gated":""}</span>`).join("")}</div>
@@ -2199,6 +2249,12 @@ $("sk-add").addEventListener("click",async()=>{
 $("cmdspark").innerHTML=SPARK;
 $("cmdgo").addEventListener("click",cmdSend);
 $("cmdinput").addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();cmdSend()}});
+$("cmddrop").addEventListener("click",()=>{
+  $("cmdpop").classList.toggle("open");
+  $("cmdbarbox").classList.toggle("optsopen",$("cmdpop").classList.contains("open"));});
+document.addEventListener("click",e=>{           // click-away closes the overrides
+  if(!e.target.closest("#cmdbarbox")){$("cmdpop").classList.remove("open");$("cmdbarbox").classList.remove("optsopen");}});
+$("cmdpop").addEventListener("change",()=>$("cmddrop").classList.toggle("tuned",cmdTuned()));
 cmdType();
 // chat assistant
 $("chatspark").innerHTML=SPARK;

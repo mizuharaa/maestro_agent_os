@@ -336,8 +336,10 @@ class Handler(SimpleHTTPRequestHandler):
         return self._json(200 if out.get("ok") else 502, out)
 
     def api_ceo(self, data):
-        """Command bar: prompt -> Haiku refine -> brain recall -> CEO plan -> roles."""
-        out, err = ceo.plan_and_start(str(data.get("text") or ""))
+        """Command bar: prompt -> Haiku refine -> brain recall -> CEO plan -> roles.
+        opts (from the Run-it dropdown) override the CEO's per-role choices."""
+        opts = data.get("opts") if isinstance(data.get("opts"), dict) else {}
+        out, err = ceo.plan_and_start(str(data.get("text") or ""), opts)
         if err:
             return self._json(502, {"error": err})
         emit(session="operator", event="mission",

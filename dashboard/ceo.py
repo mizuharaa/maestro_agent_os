@@ -223,10 +223,24 @@ def list_all():
     return out
 
 
-def plan_and_start(text):
+EFFORT_TURNS = {"quick": 15, "standard": 40, "deep": 80}
+
+
+def plan_and_start(text, opts=None):
     """The whole intake: refine -> recall -> CEO plan -> launch. Synchronous
     (the command bar shows a spinner); execution then runs on a thread.
+
+    opts (from the Run-it dropdown) override the CEO's per-role choices:
+      model   "auto" (CEO decides) | haiku|sonnet|opus|fable (force all roles)
+      effort  "auto" | quick|standard|deep (force every role's turn budget)
+      account "auto" (least used) | an account display-name
+      gate    True -> operator reviews every role before it runs
     Returns (run-dict, None) or (None, error)."""
+    opts = opts if isinstance(opts, dict) else {}
+    force_model = opts.get("model") if opts.get("model") in ROLE_MODELS else None
+    force_turns = EFFORT_TURNS.get(opts.get("effort"))
+    gate_all = bool(opts.get("gate"))
+    account_pref = str(opts.get("account") or "auto")
     text = (text or "").strip()
     if not text:
         return None, "empty goal"
@@ -258,6 +272,13 @@ def plan_and_start(text):
             role["turns"] = max(5, min(80, int(role.get("turns") or 30)))
         except (TypeError, ValueError):
             role["turns"] = 30
+        # operator overrides from the Run-it dropdown win over the CEO's choices
+        if force_model:
+            role["model"] = force_model
+        if force_turns:
+            role["turns"] = force_turns
+        if gate_all:
+            role["review"] = True
         role["depends_on"] = [d for d in (role.get("depends_on") or []) if d in seen and d != rid]
         role.update(status="pending", result="", secs=0, cost=0)
     os.makedirs(CDIR, exist_ok=True)
@@ -266,7 +287,7 @@ def plan_and_start(text):
          "summary": (p.get("summary") or "")[:300],
          "goal": text[:1000], "refined": refined[:4000],
          "recall": bool(recall), "roles": roles[:6],
-         "status": "running", "cost": 0,
+         "account_pref": account_pref, "status": "running", "cost": 0,
          "started": datetime.datetime.now().isoformat(timespec="seconds")}
     _save(o)
     t = threading.Thread(target=_run, args=(cid,), daemon=True)
@@ -329,7 +350,9 @@ def _wait_gate(cid, o, role):
 
 def _run(cid):
     o = json.load(open(_path(cid), encoding="utf-8"))
-    acct = pulse.least_used()
+    # "auto" picks the account with the most headroom; else the operator's choice
+    pref = o.get("account_pref") or "auto"
+    acct = pulse.least_used() if pref == "auto" else pref
     cfg_dir = pulse.dir_for(acct) if acct else ""
     if acct:
         o["account"] = acct
