@@ -822,7 +822,7 @@
           <div class="cmdpop" id="cmdpop">
             <div class="phead">CEO overrides · auto = the CEO decides per prompt</div>
             <div class="prow"><label>Mode</label>
-              <select id="cmd-mode"><option value="auto" selected>Auto · decide per prompt</option><option value="direct">Direct answer · no agents</option><option value="delegate">Delegate · always staff roles</option></select></div>
+              <select id="cmd-mode"><option value="auto" selected>Auto · route per prompt</option><option value="solo">Solo · run it, 1 agent, no subagents</option><option value="answer">Answer only · chat, no tools</option><option value="delegate">Delegate · CEO staffs a roster</option></select></div>
             <div class="prow"><label>Refine</label>
               <select id="cmd-refine"><option value="auto" selected>Auto · only short prompts</option><option value="off">Off · use my words as-is</option></select></div>
             <div class="prow"><label>Model</label>
@@ -832,7 +832,7 @@
             <div class="prow"><label>Account</label>
               <select id="cmd-account"><option value="auto" selected>Auto · most headroom</option></select></div>
             <label class="chk"><input type="checkbox" id="cmd-gate"> Review every role before it runs</label>
-            <div class="pnote">Auto answers simple prompts directly (cheap, no agents) and only staffs the CEO for real work. Direct = always answer, no agents. Delegate = always staff roles.</div>
+            <div class="pnote">Auto routes per prompt: pure questions get a chat answer; real work runs <b>solo</b> — one Claude Code session with full tools that actually does it, no subagents; only genuinely big jobs go to the CEO roster.</div>
           </div>
         </div>
         <div class="cmdflow" id="cmdflow"></div>
@@ -1208,8 +1208,14 @@ async function cmdSend(){
   try{
     const j=await post("/api/ceo",{text,opts:cmdOpts()});
     if(j.kind==="answer"){
-      // simple prompt: a direct cheap reply, no agents staffed
-      th.innerHTML=`${esc(j.reply)}<div class="brief">answered directly · ${esc(j.model||"cheap model")} · no agents</div>`;
+      // pure question: chat-only reply, no tools, no agents
+      th.innerHTML=`${esc(j.reply)}<div class="brief">answered from knowledge · ${esc(j.model||"cheap model")} · no tools, no agents</div>`;
+    }else if(j.route==="solo"){
+      // one Claude Code session with full tools — it's doing the work now
+      const r=(j.roles||[])[0]||{};
+      th.innerHTML=`Running it now in Claude Code — <b>one agent, no subagents</b>.
+        <a href="#/instances">watch it →</a>
+        <div class="brief">${esc(r.model||"sonnet")} · ${r.turns||40} turns · full tools in this repo${j.recall?" · brain recall folded in":""}</div>`;
     }else{
       // staffing runs on the server; the mission card below fills in as it plans
       th.innerHTML=`<b>${esc(j.name||"Mission")}</b> — the CEO is staffing the roles.

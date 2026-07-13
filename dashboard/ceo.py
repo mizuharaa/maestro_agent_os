@@ -59,34 +59,64 @@ LIMIT_RE = re.compile(
     r"rate.?limit|usage limit|session limit|quota|overloaded|"
     r"\b429\b|too many requests|reset[s]? at|try again later", re.I)
 
+ROUTES = ("answer", "solo", "delegate")
+
 REFINE_SCHEMA = {
     "type": "object",
     "properties": {
         "prompt": {"type": "string"},    # the improved, specific prompt
         "keywords": {"type": "string"},  # search keywords for brain recall
-        "simple": {"type": "boolean"},   # answerable directly, no agents/tools
+        "route": {"type": "string", "enum": list(ROUTES)},
     },
-    "required": ["prompt", "keywords", "simple"],
+    "required": ["prompt", "keywords", "route"],
     "additionalProperties": False,
 }
 
-REFINE_SYSTEM = """You improve raw operator prompts before they reach the CEO \
-of an agentic OS. Rewrite the prompt to be specific and unambiguous: expand \
-vague verbs, name concrete deliverables, keep every constraint the operator \
-stated, add nothing they didn't ask for. Also produce a short keyword string \
-for searching a knowledge base of previously solved problems.
+REFINE_SYSTEM = """You triage raw operator prompts for an agentic OS. Rewrite \
+the prompt to be specific and unambiguous: expand vague verbs, name concrete \
+deliverables, keep every constraint the operator stated, add nothing they \
+didn't ask for. Also produce a short keyword string for searching a knowledge \
+base of previously solved problems.
 
-Set simple=true when the goal is a question or a small ask that can be \
-answered directly in one reply WITHOUT editing files, running tools, or \
-multi-step work — e.g. 'what does X do', 'explain Y', 'summarize this', a \
-quick lookup, a definition, advice. Set simple=false when it needs building, \
-editing, testing, research, or multi-step orchestration (anything that should \
-staff agents). When unsure, prefer simple=false."""
+Then pick the cheapest route that can ACTUALLY do the job:
+- "answer": pure knowledge/explanation, answerable in one reply from what you \
+already know. NO tools, NO files, NO network, NO commands. e.g. 'what does X \
+mean', 'explain this concept', 'give me advice'.
+- "solo": real work, but one focused task a SINGLE agent can do end-to-end \
+with tools — reading/editing files, running commands, fetching from an API or \
+GitHub, a scoped fix, a lookup that needs the repo or network. Most work \
+belongs here.
+- "delegate": genuinely big — several independent workstreams, or a build that \
+needs planning plus separate review/verification. Only when one agent working \
+sequentially would be clearly worse.
 
-# a direct-answer request uses the cheap chat assistant, not the CEO. map the
-# dropdown's model override to a real id; None lets chat pick Haiku/Sonnet.
+CRITICAL: if doing it requires touching files, running anything, or reaching \
+the network, it is NEVER "answer" — it is at least "solo". When unsure between \
+solo and delegate, pick "solo"."""
+
+# a chat-only answer uses the cheap assistant, not a Claude Code session. map
+# the dropdown's model override to a real id; None lets chat pick Haiku/Sonnet.
 DIRECT_MODELS = {"haiku": "claude-haiku-4-5", "sonnet": "claude-sonnet-5",
                  "opus": "claude-opus-4-8", "fable": "claude-fable-5"}
+
+# solo = one Claude Code session, full tools, in this repo. It must DO the work,
+# not describe it, and must not delegate (that's the whole point of the mode).
+SOLO_BRIEF = """Do this task yourself, now, in this repo.
+
+RULES:
+- You have full tools. Actually DO the work — read/edit files, run commands,
+  call APIs, fetch what you need. Never just describe what you would do, and
+  never emit a command for someone else to run.
+- Do NOT delegate. Do NOT spawn subagents or use the Agent/Task tool. You are
+  a single agent working alone — that is deliberate.
+- Stay scoped to what was asked; don't refactor or build extras around it.
+- Finish by reporting concretely what you did and what changed (files, output,
+  results). If you couldn't do something, say so plainly.
+- Only if you hit something genuinely non-obvious, record it:
+  python hermes/hermes.py note "<problem>" "<solution>" --tags solo
+
+TASK:
+"""
 
 PLAN_SCHEMA = {
     "type": "object",
@@ -290,25 +320,33 @@ EFFORT_TURNS = {"quick": 15, "standard": 40, "deep": 80}
 # specific — re-writing it burns a call and can dilute the operator's wording.
 # Only short/terse prompts get refined; the rest go to the CEO verbatim.
 REFINE_MAX_CHARS = 180
+# anything that has to touch files / run something / hit the network is real
+# work — it needs a Claude Code session with tools, never a chat-only answer.
 WORK_RE = re.compile(
     r"\b(fix|build|creat|add|implement|refactor|writ|run|test|deploy|audit|"
     r"migrat|updat|remov|delet|revamp|orchestrat|automat|debug|investigat|"
-    r"scan|generat|set ?up|install|configur|clean|optimi[sz]|rename|wire)\w*\b", re.I)
+    r"scan|generat|set ?up|install|configur|clean|optimi[sz]|rename|wire|"
+    r"fetch|pull|clone|push|commit|search|find|check|review|analy[sz]|"
+    r"refresh|sync|verify|prioriti[sz]|plan)\w*\b", re.I)
 ASK_RE = re.compile(
     r"^\s*(what|who|whom|whose|when|where|why|how|which|is|are|was|were|does|do|did|"
-    r"can|could|should|would|explain|describe|summar|define|tell me|list|show me)\b", re.I)
+    r"can|could|should|would|explain|describe|summar|define|tell me)\b", re.I)
 
 
 def _classify(text):
-    """Free, local triage — no API call. Returns (needs_refine, simple_guess).
+    """Free, local triage — no API call. Returns (needs_refine, route_guess).
 
     needs_refine: only short/terse prompts benefit from the Haiku rewrite.
-    simple_guess: a question with no work verbs is answerable directly. Used
-    as-is when we skip the refiner; otherwise Haiku's judgment wins."""
+    route_guess: a pure question with no work verbs can be answered from
+    knowledge; anything else is real work, so default to a solo Claude Code
+    run (tools, one agent) rather than the full CEO roster. Used as-is when we
+    skip the refiner; otherwise the model's judgment wins."""
     long_prompt = len(text) >= REFINE_MAX_CHARS
     work = bool(WORK_RE.search(text))
     ask = bool(ASK_RE.match(text))
-    return (not long_prompt), (ask and not work and not long_prompt)
+    if ask and not work and not long_prompt:
+        return True, "answer"
+    return (not long_prompt), "solo"
 
 
 def plan_and_start(text, opts=None):
@@ -317,50 +355,84 @@ def plan_and_start(text, opts=None):
     was what produced "Failed to fetch" in the browser).
 
     opts (from the Run-it dropdown):
-      mode    "auto" (decide per prompt) | direct (answer, no agents) | delegate
+      mode    "auto" (route per prompt) | answer | solo | delegate
       refine  "auto" (only short/vague prompts) | off (never rewrite my prompt)
       model   "auto" (CEO decides) | haiku|sonnet|opus|fable (force all roles)
       effort  "auto" | quick|standard|deep (force every role's turn budget)
       account "auto" (least used) | an account display-name
       gate    True -> operator reviews every role before it runs
-    Returns (result, None) or (None, error). result["kind"] is "answer" (a
-    direct cheap reply, no mission) or "mission" (staffing started)."""
+
+    Three real routes:
+      answer   chat-only reply (no tools) — pure knowledge questions
+      solo     ONE Claude Code session with full tools, no CEO, no subagents
+      delegate the CEO staffs a roster of roles
+    Returns (result, None) or (None, error); result["kind"] is "answer" or
+    "mission" (solo and delegate both produce a mission card)."""
     opts = opts if isinstance(opts, dict) else {}
-    mode = opts.get("mode") if opts.get("mode") in ("auto", "direct", "delegate") else "auto"
+    mode = opts.get("mode") if opts.get("mode") in ("auto",) + ROUTES else "auto"
     refine_off = str(opts.get("refine") or "auto") == "off"
     force_model = opts.get("model") if opts.get("model") in ROLE_MODELS else None
+    force_turns = EFFORT_TURNS.get(opts.get("effort"))
     text = (text or "").strip()
     if not text:
         return None, "empty goal"
-    needs_refine, simple = _classify(text)
+    needs_refine, route = _classify(text)
     refined, keywords = text, text
-    # 1. Haiku prompt smith — ONLY for short/vague prompts, and never in direct
-    # mode (nothing to plan) or when the operator turned refinement off.
-    if needs_refine and not refine_off and mode != "direct":
+    # 1. Haiku prompt smith — ONLY for short/vague prompts, and only when its
+    # routing judgment can still matter (never when the operator forced a mode
+    # AND turned refinement off, or in answer mode where there's nothing to plan).
+    if needs_refine and not refine_off and mode != "answer":
         r = _api(REFINER, REFINE_SYSTEM, text, REFINE_SCHEMA, max_tokens=1500, timeout=45)
         if not r.get("error"):
             refined = r.get("prompt") or text
             keywords = r.get("keywords") or text
-            simple = bool(r.get("simple"))   # the model's judgment beats the heuristic
-    # 2. Simple asks get a direct, cheap answer — no agents, no high effort.
-    if mode == "direct" or (mode == "auto" and simple):
+            if r.get("route") in ROUTES:
+                route = r["route"]        # the model's judgment beats the heuristic
+    if mode != "auto":
+        route = mode                       # an explicit choice always wins
+    # 2. answer: chat only, no tools, no agents. Cheap questions.
+    if route == "answer":
         ans = chat.ask(refined, model=DIRECT_MODELS.get(force_model))
         if ans.get("error"):
             return None, ans["error"]
         return {"kind": "answer", "reply": ans.get("reply") or "(no reply)",
                 "model": ans.get("model"), "goal": text[:1000]}, None
-    # 3. Real work: create the mission NOW (status "planning") and hand the slow
-    # recall+CEO plan to a thread. The UI shows the card immediately.
     os.makedirs(CDIR, exist_ok=True)
     cid = uuid.uuid4().hex[:8]
     o = {"cid": cid, "name": text[:40], "summary": "", "goal": text[:1000],
          "refined": refined[:4000], "keywords": keywords[:300], "recall": False,
-         "roles": [], "opts": {"model": force_model,
-                               "turns": EFFORT_TURNS.get(opts.get("effort")),
-                               "gate": bool(opts.get("gate"))},
+         "roles": [], "route": route,
+         "opts": {"model": force_model, "turns": force_turns,
+                  "gate": bool(opts.get("gate"))},
          "account_pref": str(opts.get("account") or "auto"),
-         "status": "planning", "cost": 0,
+         "status": "running", "cost": 0,
          "started": datetime.datetime.now().isoformat(timespec="seconds")}
+    # 3. solo: run the prompt in ONE Claude Code session with full tools — no
+    # planning call, no roster, no subagents. This is "just run it" mode.
+    if route == "solo":
+        recall = _recall(keywords)
+        brief = SOLO_BRIEF + refined
+        if recall:
+            brief += ("\n\n## Brain recall — solved before, reuse don't re-solve:\n"
+                      + recall)
+        o.update(name=text[:40], summary="Single Claude Code session — no delegation.",
+                 recall=bool(recall),
+                 roles=[{"id": "solo", "title": "Direct run (no delegation)",
+                         "mission": brief, "model": force_model or "sonnet",
+                         "turns": force_turns or 40, "depends_on": [],
+                         "review": bool(opts.get("gate")), "status": "pending",
+                         "result": "", "secs": 0, "cost": 0}])
+        _save(o)
+        t = threading.Thread(target=_run, args=(cid,), daemon=True)
+        with LOCK:
+            LIVE[cid] = {"thread": t, "proc": None, "stop": False, "gate": {}}
+        t.start()
+        emit(cid, "solo run (%s, %dt, no subagents): %s"
+             % (o["roles"][0]["model"], o["roles"][0]["turns"], text[:100]))
+        return dict(o, kind="mission"), None
+    # 4. delegate: create the card NOW (status "planning") and hand the slow
+    # recall + CEO plan to a thread, so the HTTP request never hangs.
+    o["status"] = "planning"
     _save(o)
     t = threading.Thread(target=_plan_then_run, args=(cid,), daemon=True)
     with LOCK:
