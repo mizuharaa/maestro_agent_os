@@ -32,6 +32,7 @@ permission-skipping agents. Never bind 0.0.0.0.
 
 Usage: python dashboard/serve.py [port]     (default 8817)
 """
+import base64
 import collections
 import ctypes
 import datetime
@@ -59,6 +60,7 @@ import orchestrator              # the conductor feedback loop
 import pulse                     # outside world: claude/codex usage, github, gmail, spotify
 import chat                      # dashboard assistant (Haiku/Sonnet over the Anthropic API)
 import ceo                       # command bar: prompt -> Haiku refine -> CEO plan -> roles
+import uia                       # structured, verified Windows UI Automation
 import daily_briefing            # offline: where you left off + what to continue
 MIRROR = os.path.join(ROOT, ".claude", "hooks", "mirror.py")
 INBOX = os.path.join(ROOT, "state", "inbox.jsonl")
@@ -121,7 +123,10 @@ def emit(**kv):
     args = []
     for k, v in kv.items():
         args += ["--" + k, str(v)]
-    subprocess.run([sys.executable, MIRROR] + args, capture_output=True)
+    # fire-and-forget: a wire event must never add a subprocess round-trip
+    # to request latency; mirror.py appends atomically on its own
+    subprocess.Popen([sys.executable, MIRROR] + args,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 # ---------------------------------------------------------------- window mgmt
@@ -246,6 +251,47 @@ def vault_note(rel):
         return open(full, encoding="utf-8", errors="ignore").read(2600)
     except OSError:
         return None
+
+
+_WHISPER = None
+_WHISPER_LOCK = threading.Lock()
+
+LOOP_ACTIVE = ("running", "retrying", "waiting")
+MISSION_ACTIVE = ("planning", "running", "retrying", "repairing",
+                  "waiting_permission", "review")
+
+
+def activity_payload():
+    """Small stable feed for the mini bar: running work, recent ends, and the
+    approval queue (permission-waiting roles with their bound request ids)."""
+    running, recent, approvals = [], [], []
+    for o in orchestrator.list_all():
+        item = {"kind": "loop", "id": o.get("oid") or "",
+                "title": (o.get("name") or o.get("mission") or "loop")[:80],
+                "status": o.get("status") or ""}
+        (running if o.get("status") in LOOP_ACTIVE and o.get("live") else recent).append(item)
+    for r in ceo.list_all():
+        item = {"kind": "mission", "id": r.get("cid") or "",
+                "title": (r.get("name") or r.get("mission") or "mission")[:80],
+                "status": r.get("status") or ""}
+        (running if r.get("status") in MISSION_ACTIVE else recent).append(item)
+        pub = ceo.public_run(r)
+        for role in pub.get("roles") or []:
+            req = role.get("permission_request")
+            if role.get("status") != "waiting_permission" or not isinstance(req, dict):
+                continue
+            if not req.get("request_id") or req.get("status") not in (None, "pending"):
+                continue
+            approvals.append({
+                "cid": pub.get("cid") or "",
+                "role": req.get("role_id") or "",
+                "request_id": req.get("request_id"),
+                "mission": item["title"],
+                "summary": (req.get("summary") or "operator decision required")[:160],
+                "kind": req.get("kind") or "guard",
+                "can_authorize": req.get("can_authorize") is not False,
+            })
+    return {"running": running, "recent": recent[:8], "approvals": approvals}
 
 
 def brain_payload(limit=100):
@@ -461,6 +507,14 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(200, {"content": body})
         if self.path == "/api/orchestrations":
             return self._json(200, {"orchestrations": orchestrator.list_all()})
+        if self.path == "/api/activity":
+            return self._json(200, activity_payload())
+        if self.path == "/api/uia/windows":
+            try:
+                return self._json(200, {"windows": uia.windows()})
+            except uia.UiaError as e:
+                return self._json(501 if "not installed" in str(e) else 400,
+                                  {"error": str(e)})
         if self.path == "/api/brain":
             return self._json(200, brain_payload())
         if self.path == "/api/ceo":
@@ -546,6 +600,11 @@ class Handler(SimpleHTTPRequestHandler):
             "/api/briefing/run": self.api_briefing_run,
             "/api/briefing/settings": self.api_briefing_settings,
             "/api/spotify/ctl": self.api_spotify_ctl,
+            "/api/stop-all": self.api_stop_all,
+            "/api/voice": self.api_voice,
+            "/api/uia/tree": self.api_uia_tree,
+            "/api/uia/act": self.api_uia_act,
+            "/api/uia/read": self.api_uia_read,
         }.get(self.path)
         if not route:
             return self._json(404, {"error": "unknown endpoint"})
@@ -564,6 +623,76 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(500, {"error": ((r.stderr or r.stdout) or "engine error")[:200]})
         emit(session="operator", event="skill", detail="added skill '%s' (%s, /%s)" % (name, branch, trig))
         return self._json(200, {"ok": True, "name": name, "branch": branch})
+
+    def api_stop_all(self, data):
+        """Panic button: stop every live loop and active mission."""
+        stopped, errors = [], []
+        for o in orchestrator.list_all():
+            if o.get("status") in LOOP_ACTIVE and o.get("live"):
+                err = orchestrator.action(o.get("oid") or "", "stop", "")
+                (errors if err else stopped).append("loop:%s" % o.get("oid"))
+        for r in ceo.list_all():
+            if r.get("status") in MISSION_ACTIVE:
+                err = ceo.action(r.get("cid") or "", "", "stop", "")
+                (errors if err else stopped).append("mission:%s" % r.get("cid"))
+        emit(session="operator", event="stop-all",
+             detail="stopped %d (%s)" % (len(stopped), ", ".join(stopped)[:150]))
+        return self._json(200, {"ok": True, "stopped": stopped, "errors": errors})
+
+    def api_voice(self, data):
+        """Transcribe one mini-bar voice clip with local Whisper."""
+        try:
+            raw = base64.b64decode(str(data.get("audio_b64") or ""), validate=True)
+        except (ValueError, TypeError):
+            return self._json(400, {"error": "audio_b64 must be valid base64"})
+        if not raw:
+            return self._json(400, {"error": "empty audio"})
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError:
+            return self._json(501, {"error": "faster-whisper not installed",
+                                    "hint": "pip install faster-whisper"})
+        clip = os.path.join(ROOT, "state", "voice-last.webm")
+        with open(clip, "wb") as f:
+            f.write(raw)
+        global _WHISPER
+        with _WHISPER_LOCK:
+            if _WHISPER is None:
+                # ponytail: base/int8 on CPU; bump to small or GPU if accuracy hurts
+                _WHISPER = WhisperModel("base", device="cpu", compute_type="int8")
+            try:
+                segments, _info = _WHISPER.transcribe(clip, vad_filter=True)
+                text = " ".join(s.text.strip() for s in segments).strip()
+            except Exception as e:
+                return self._json(500, {"error": "transcription failed: %s" % str(e)[:150]})
+        return self._json(200, {"ok": True, "text": text})
+
+    def _uia(self, fn, **kw):
+        try:
+            return self._json(200, fn(**kw))
+        except uia.UiaError as e:
+            return self._json(501 if "not installed" in str(e) else 400,
+                              {"error": str(e)})
+        except Exception as e:
+            return self._json(500, {"error": ("%s: %s" % (type(e).__name__, e))[:200]})
+
+    def api_uia_tree(self, data):
+        return self._uia(uia.tree, pid=data.get("pid"), title_re=data.get("title_re"),
+                         depth=int(data.get("depth") or 3),
+                         max_nodes=int(data.get("max_nodes") or 400))
+
+    def api_uia_act(self, data):
+        out = self._uia(uia.act, pid=data.get("pid"), title_re=data.get("title_re"),
+                        locator=data.get("locator") or {},
+                        action=str(data.get("action") or "invoke"),
+                        value=data.get("value"))
+        emit(session="operator", event="uia-act",
+             detail=("%s %s" % (data.get("action"), data.get("locator")))[:200])
+        return out
+
+    def api_uia_read(self, data):
+        return self._uia(uia.read, pid=data.get("pid"), title_re=data.get("title_re"),
+                         locator=data.get("locator") or {})
 
     def api_spotify_ctl(self, data):
         out = pulse.spotify_ctl(str(data.get("action") or ""), data.get("pos_ms"))
